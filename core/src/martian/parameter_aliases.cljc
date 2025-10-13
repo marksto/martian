@@ -1,9 +1,12 @@
 (ns martian.parameter-aliases
+  (:refer-clojure :exclude [get])
   (:require [clojure.set :refer [rename-keys]]
             [martian.schema-tools :as schema-tools]
             [schema.core :as s]))
 
-(defn- aliases-at
+(def -get clojure.core/get)
+
+(defn -aliases-at
   "Internal helper. Given a `schema`, a path-local `cache` (atom), an `interner`
    (atom), and a `path` (vector or seq), returns the alias map for that path.
 
@@ -15,40 +18,59 @@
    - Returns `nil` when there are no aliases at the given path."
   [schema cache interner path]
   (let [path' (if (vector? path) path (vec path))]
-    (or (get @cache path')
+    (or (-get @cache path')
         (let [m (schema-tools/compute-aliases-at schema path')
               m' (when m
-                   (or (get @interner m)
+                   (or (-get @interner m)
                        (-> interner
                            (swap! #(if (contains? % m) % (assoc % m m)))
-                           (get m))))]
+                           (-get m))))]
           (swap! cache assoc path' m')
           m'))))
 
-#?(:clj
-   (do
-     (deftype LazyRegistry [schema cache interner]
-       clojure.lang.ILookup
-       (valAt [_ k]
-         (aliases-at schema cache interner k))
-       (valAt [_ k not-found]
-         (or (aliases-at schema cache interner k) not-found)))
+(defprotocol AliasesRegistry
+  (get [this path]))
 
-     (defmethod print-method martian.parameter_aliases.LazyRegistry
-       [^martian.parameter_aliases.LazyRegistry r ^java.io.Writer w]
-       (.write w (str "#LazyRegistry (cached " (count @(.cache r)) ")")))))
+#?(:bb
+   (deftype LazyRegistry [schema cache interner]
+     AliasesRegistry
+     (get [_ path] (-aliases-at schema cache interner path))
+     Object
+     (toString [_] (str "#LazyRegistry (cached " (count @cache) ")")))
 
-#?(:cljs
+   :clj
+   (deftype LazyRegistry [schema cache interner]
+     clojure.lang.ILookup
+     (valAt [_ k]
+       (-aliases-at schema cache interner k))
+     (valAt [_ k not-found]
+       (or (-aliases-at schema cache interner k) not-found))
+     AliasesRegistry
+     (get [_ path] (-aliases-at schema cache interner path))
+     Object
+     (toString [_] (str "#LazyRegistry (cached " (count @cache) ")")))
+
+   :cljs
    (deftype LazyRegistry [schema cache interner]
      cljs.core/ILookup
      (-lookup [_ k]
-       (aliases-at schema cache interner k))
+       (-aliases-at schema cache interner k))
      (-lookup [_ k not-found]
-       (or (aliases-at schema cache interner k) not-found))
+       (or (-aliases-at schema cache interner k) not-found))
+     AliasesRegistry
+     (get [_ path] (-aliases-at schema cache interner path))
 
      cljs.core/IPrintWithWriter
      (-pr-writer [_ writer _opts]
        (-write writer (str "#LazyRegistry (cached " (count @cache) ")")))))
+
+;; NB: Make plain maps satisfy the protocol too (useful for testing).
+#?(:clj  (extend-type clojure.lang.IPersistentMap
+           AliasesRegistry
+           (get [m path] (-get m path)))
+   :cljs (extend-type cljs.core/PersistentArrayMap
+           AliasesRegistry
+           (get [m path] (-get m path))))
 
 (defn parameter-aliases
   "Build a lazy alias registry for the given `schema`.
